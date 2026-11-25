@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 
 // One line: the text a gamer sends the boss to skip work on GTA 6 launch
 // week. Chosen against the judge's brief, in its own order: it is squarely
@@ -28,34 +28,49 @@ const text =
 // judge would refuse. The gate is strict on purpose — the entry file must
 // be exactly this one line, byte for byte: no carriage return (a second
 // kind of line break), no leading or trailing padding (the judge reads the
-// file as submitted), and no control characters.
-const codePoints = [...text].length;
-const words = text.split(/\s+/).filter(Boolean).length;
-if (codePoints < 1 || codePoints > 140 || text.trim().length === 0) {
-  throw new Error(
-    `entry must be 1-140 characters of non-blank text, got ${codePoints}`,
-  );
-}
-if (words > 20) {
-  throw new Error(`entry must be at most 20 words, got ${words}`);
-}
-if (text.includes("\n") || text.includes("\r")) {
-  throw new Error("entry must be a single line");
-}
-if (text !== text.trim()) {
-  throw new Error("entry must not start or end with whitespace");
-}
-if (/[\u0000-\u001f\u007f]/.test(text)) {
-  throw new Error("entry must not contain control characters");
+// file as submitted), and no control or invisible characters (a byte-order
+// mark or zero-width character would be read as part of the line without
+// ever being seen, and would change the entry's byte length against its
+// character count).
+function validateLine(raw: string): string {
+  const text = raw.replace(/\s+/g, " ").trim();
+  const codePoints = [...text].length;
+  const words = text.split(/\s+/).filter(Boolean).length;
+  if (codePoints < 1 || codePoints > 140 || text.length === 0) {
+    throw new Error(
+      `entry must be 1-140 characters of non-blank text, got ${codePoints}`,
+    );
+  }
+  if (words > 20) {
+    throw new Error(`entry must be at most 20 words, got ${words}`);
+  }
+  if (text.includes("\n") || text.includes("\r")) {
+    throw new Error("entry must be a single line");
+  }
+  if (text.includes("\u2028") || text.includes("\u2029")) {
+    throw new Error("entry must not contain line/paragraph separators");
+  }
+  if (/[\u0000-\u001f\u007f\ufeff\u200b-\u200d]/.test(text)) {
+    throw new Error("entry must not contain control or invisible characters");
+  }
+  return text;
 }
 
+const entry = validateLine(text);
+
 mkdirSync("/output", { recursive: true });
-writeFileSync("/output/entry.txt", text, "utf8");
+// Write atomically: a crash mid-write must never leave a partial entry.txt
+// for the grader — temp file beside it, then rename into place. The grader
+// collects outputs as another user, so leave the file readable by everyone.
+const tmpPath = "/output/.entry.txt.tmp";
+writeFileSync(tmpPath, entry, { encoding: "utf8", mode: 0o644 });
+chmodSync(tmpPath, 0o644);
+renameSync(tmpPath, "/output/entry.txt");
 
 // Read it back and prove the file on disk is exactly the line: a write
 // that silently truncated, re-encoded or padded the entry would otherwise
 // ship a different text to the judge than the one gated above.
 const written = readFileSync("/output/entry.txt", "utf8");
-if (written !== text) {
+if (written !== entry) {
   throw new Error("entry file does not match the gated line");
 }
